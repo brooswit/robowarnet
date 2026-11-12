@@ -434,45 +434,153 @@ pub fn run_ladder(ctx: &ReducerContext, _timer: LadderTimer) {
     };
     let mut robots: Vec<_> = ctx.db.robot().iter().collect();
     robots.sort_by_key(|robot| robot.rank);
-    let index = ladder.cursor as usize;
-    if index + 1 >= robots.len() {
+    update_tv(ctx, &robots);
+    let slots = ladder_slots(ladder.sweep, robots.len());
+    if slots < 2 {
         return;
     }
-    let (left, right) = robots.split_at_mut(index + 1);
-    let lower = &mut left[index];
-    let higher = &mut right[0];
-    let programs = [program(ctx, lower.id), program(ctx, higher.id)];
-    let winner = match programs {
-        [Ok(a), Ok(b)] => {
+    let index = (ladder.cursor as usize).min(robots.len() - slots);
+    let entrants = &mut robots[index..index + slots];
+    let valid: Vec<_> = entrants
+        .iter()
+        .enumerate()
+        .filter_map(|(index, robot)| program(ctx, robot.id).ok().map(|program| (index, program)))
+        .collect();
+    let winner = match valid.len() {
+        0 => None,
+        1 => Some(valid[0].0),
+        _ => {
+            let indices: Vec<_> = valid.iter().map(|(index, _)| *index).collect();
             sim::simulate(
-                vec![a, b],
+                valid.into_iter().map(|(_, program)| program).collect(),
                 ctx.timestamp.to_micros_since_unix_epoch() as u64,
                 false,
             )
             .winner
+            .map(|index| indices[index])
         }
-        [Ok(_), Err(_)] => Some(0),
-        [Err(_), Ok(_)] => Some(1),
-        _ => None,
     };
-    ladder.lower = lower.name.clone();
-    ladder.higher = higher.name.clone();
-    ladder.winner = match winner {
-        Some(0) => lower.name.clone(),
-        Some(1) => higher.name.clone(),
-        _ => "Draw".into(),
-    };
-    if winner == Some(0) {
-        std::mem::swap(&mut lower.rank, &mut higher.rank);
+    ladder.lower = entrants
+        .iter()
+        .map(|robot| robot.name.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    ladder.higher.clear();
+    ladder.winner = winner.map_or_else(|| "Draw".into(), |index| entrants[index].name.clone());
+    promote_winner(entrants, winner);
+    for robot in entrants {
+        robot.bouts += 1;
+        ctx.db.robot().id().update(robot.clone());
     }
-    lower.bouts += 1;
-    higher.bouts += 1;
-    ctx.db.robot().id().update(lower.clone());
-    ctx.db.robot().id().update(higher.clone());
-    ladder.cursor += 1;
-    if ladder.cursor as usize + 1 == robots.len() {
+    ladder.cursor = index as u64 + 1;
+    if ladder.cursor as usize + slots > robots.len() {
         ladder.cursor = 0;
         ladder.sweep += 1;
     }
     ctx.db.ladder().id().update(ladder);
+}
+
+fn ladder_slots(sweep: u64, population: usize) -> usize {
+    (2 + sweep.saturating_sub(1) as usize % 9).min(population)
+}
+
+fn promote_winner(entrants: &mut [Robot], winner: Option<usize>) {
+    if let Some(winner) = winner {
+        let highest = entrants.last().unwrap().rank;
+        for robot in &mut entrants[winner + 1..] {
+            robot.rank -= 1;
+        }
+        entrants[winner].rank = highest;
+    }
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::*;
+    #[test]
+    fn cycles_two_through_ten_and_caps_to_population() {
+        assert_eq!(
+            (1..=10)
+                .map(|sweep| ladder_slots(sweep, 30))
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 2]
+        );
+        assert_eq!(ladder_slots(9, 4), 4);
+    }
+    #[test]
+    fn winner_advances_and_other_order_is_preserved() {
+        let mut entrants: Vec<_> = (5..15)
+            .map(|rank| Robot {
+                id: rank,
+                owner: LEGACY,
+                name: rank.to_string(),
+                rank,
+                bouts: 0,
+            })
+            .collect();
+        promote_winner(&mut entrants, Some(2));
+        assert_eq!(
+            entrants.iter().map(|robot| robot.rank).collect::<Vec<_>>(),
+            vec![5, 6, 14, 7, 8, 9, 10, 11, 12, 13]
+        );
+        let ranks: Vec<_> = entrants.iter().map(|robot| robot.rank).collect();
+        promote_winner(&mut entrants, None);
+        assert_eq!(
+            ranks,
+            entrants.iter().map(|robot| robot.rank).collect::<Vec<_>>()
+        );
+    }
+}
+
+// Replay key zero is reserved for the TV channel; lobby IDs auto-increment from one.
+fn update_tv(ctx: &ReducerContext, robots: &[Robot]) {
+    let now = ctx.timestamp.to_micros_since_unix_epoch();
+    if robots.len() < 2
+        || ctx
+            .db
+            .replay()
+            .lobby()
+            .find(0)
+            .is_some_and(|replay| now - replay.started < 20_000_000)
+    {
+        return;
+    }
+    let mut random = now as u64;
+    let mut next = || {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        random
+    };
+    let count = 2 + (next() as usize % (robots.len().min(10) - 1));
+    let mut candidates: Vec<_> = robots.iter().collect();
+    for index in (1..candidates.len()).rev() {
+        let other = next() as usize % (index + 1);
+        candidates.swap(index, other);
+    }
+    let mut programs = Vec::new();
+    let mut names = Vec::new();
+    for robot in candidates {
+        if let Ok(program) = program(ctx, robot.id) {
+            programs.push(program);
+            names.push(robot.name.clone());
+            if programs.len() == count {
+                break;
+            }
+        }
+    }
+    if programs.len() < 2 {
+        return;
+    }
+    let outcome = sim::simulate(programs, now as u64, true);
+    if let Ok(frames) = serde_json::to_string(&outcome.frames) {
+        ctx.db.replay().lobby().delete(0);
+        ctx.db.replay().insert(Replay {
+            lobby: 0,
+            names,
+            frames,
+            winner: outcome.winner.map(|index| index as u8),
+            started: now,
+        });
+    }
 }

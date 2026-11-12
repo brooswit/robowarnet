@@ -7,7 +7,7 @@ import './style.css';
 const uri = import.meta.env.VITE_STDB_URL || 'ws://127.0.0.1:3000';
 const database = import.meta.env.VITE_STDB_DATABASE || 'robowarnet';
 const tokenKey = `robowarnet:${uri}:${database}`;
-const colors = ['#eaff72', '#69dfef', '#ff946c', '#c7aaff', '#ffa6cb', '#a1f8bd'];
+const colors = ['#eaff72', '#69dfef', '#ff946c', '#c7aaff', '#ffa6cb', '#a1f8bd', '#ffcf66', '#adbbff', '#e5a9ff', '#ffffff'];
 const initialSource = `{ Sweep the arena and shoot when RANGE sees a target. }
 Main:
   RANGE 0 > Shoot IF
@@ -28,7 +28,7 @@ const builder = DbConnection.builder()
 
 const same = (left, right) => Boolean(left && right && left.isEqual(right));
 
-function Arena({ replay }) {
+function Arena({ replay, title = 'Arena' }) {
   const frames = useMemo(() => replay ? JSON.parse(replay.frames) : [], [replay?.started]);
   const [position, setPosition] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -47,7 +47,7 @@ function Arena({ replay }) {
   const frame = frames[Math.min(position, frames.length - 1)];
   const finished = Boolean(frame && position === frames.length - 1);
   return <section className="panel arena">
-    <div className="panel-heading"><h2>Arena</h2><span className="tag">{frame ? `CHRONON ${frame.tick}` : 'STANDBY'}</span></div>
+    <div className="panel-heading"><h2>{title}</h2><span className="tag">{frame ? `CHRONON ${frame.tick}` : 'STANDBY'}</span></div>
     <div className="arena-field">
       <svg viewBox="0 0 300 300" aria-label="Battle arena" role="img">
         <defs><pattern id="grid" width="15" height="15" patternUnits="userSpaceOnUse"><path d="M15 0H0V15" fill="none" stroke="#263438" strokeWidth=".65" /></pattern></defs>
@@ -140,7 +140,7 @@ function App() {
     <header>
       <div className="brand"><span className="brand-mark" aria-hidden="true">⌖</span> RoboWar<span>Net</span></div>
       <nav aria-label="Main navigation">
-        {['Arena', 'Robot Bay', 'Ladder'].map(tab => <button key={tab} aria-current={page === tab ? 'page' : undefined} onClick={() => setPage(tab)}>{tab}</button>)}
+        {['Arena', 'TV', 'Robot Bay', 'Ladder'].map(tab => <button key={tab} aria-current={page === tab ? 'page' : undefined} onClick={() => setPage(tab)}>{tab}</button>)}
       </nav>
       <span className="connection"><i className={connection.isActive ? 'online' : ''} />{account?.handle || (connection.isActive ? 'Connected' : 'Disconnected')}</span>
     </header>
@@ -194,7 +194,16 @@ function App() {
           </>}
         </section>
       </div>}
-      {page === 'Robot Bay' && <section className="panel workshop">
+      {page === 'TV' && <div className="arena-layout">
+        <Arena replay={replays.find(row => row.lobby === 0n)} title="RoboWar TV" />
+        <section className="panel">
+          <div className="panel-heading"><h2>On air</h2><span className="tag">EXHIBITION</span></div>
+          <p className="muted">Random robots. Random match size. A new match every 20 seconds.</p>
+          <ul className="rows">{replays.find(row => row.lobby === 0n)?.names.map((name, index) =>
+            <li key={index}><span style={{ color: colors[index] }}>{name}</span></li>)}</ul>
+        </section>
+      </div>}
+      {page === 'Robot Bay'  && <section className="panel workshop">
         <div className="panel-heading"><h2>Robot Bay</h2><span className="tag">RoboTalk</span></div>
         <form onSubmit={event => {
           event.preventDefault();
@@ -212,8 +221,8 @@ function App() {
         </form>
       </section>}
       {page === 'Ladder' && <section className="panel leaderboard">
-        <div className="panel-heading"><h2>Ladder</h2>{latest && <span className="tag">SWEEP {String(latest.sweep)}</span>}</div>
-        {latest?.lower && <p className="last-bout">{latest.lower} vs. {latest.higher} <span>{latest.winner === 'Draw' ? 'Draw' : `Winner: ${latest.winner}`}</span></p>}
+        <div className="panel-heading"><h2>Ladder</h2>{latest && <span className="tag">SWEEP {String(latest.sweep)} · {Math.min(robots.length, 2 + Number((latest.sweep - 1n) % 9n))} BOTS</span>}</div>
+        {latest?.lower && <p className="last-bout">{latest.lower}{latest.higher && ` vs. ${latest.higher}`} <span>{latest.winner === 'Draw' ? 'Draw' : `Winner: ${latest.winner}`}</span></p>}
         <table><thead><tr><th>Rank</th><th>Robot</th><th>Owner</th><th>Bouts</th></tr></thead>
           <tbody>{ranked.map(bot => <tr key={String(bot.id)}><td>{String(bot.rank)}</td><td>{bot.name}</td><td>{ownerName(bot.owner)}</td><td>{String(bot.bouts)}</td></tr>)}</tbody>
         </table>
